@@ -1,0 +1,54 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // TODO: replace with your real login email (the one you sign up with).
+    // Only a user document whose "email" field equals this can ever have role == 'admin' -
+    // enforced here, not just in the app UI, so it can't be bypassed even by another admin.
+    function OWNER_EMAIL() { return "your-email@example.com"; }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function myUserDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    function isApproved() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && myUserDoc().status == 'approved';
+    }
+    function isAdmin() {
+      return isApproved() && myUserDoc().role == 'admin';
+    }
+    function targetIsOwner() {
+      return request.resource.data.email == OWNER_EMAIL();
+    }
+
+    // Each user manages their own access-request document.
+    // They can create their own "pending" request, and edit only their display name afterwards.
+    // Only an admin can change role/status (approve, block, promote).
+    match /users/{uid} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.auth.uid == uid
+        && request.resource.data.role == 'member'
+        && request.resource.data.status == 'pending';
+      allow update: if (isAdmin() && (request.resource.data.role != 'admin' || targetIsOwner()))
+        || (isSignedIn() && request.auth.uid == uid
+            && request.resource.data.role == resource.data.role
+            && request.resource.data.status == resource.data.status);
+      allow delete: if isAdmin();
+    }
+
+    // Shared team configuration: roster, concept bank, defaults.
+    match /teamData/{docId} {
+      allow read, write: if isApproved();
+    }
+
+    // Archive of finished games.
+    match /games/{gameId} {
+      allow read, write: if isApproved();
+    }
+  }
+}
