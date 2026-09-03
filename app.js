@@ -54,7 +54,7 @@ window.addEventListener('appinstalled', ()=>{ deferredInstallPrompt=null; render
 function installBannerHtml(){
   if(!deferredInstallPrompt || installBannerDismissed || isStandalone()) return '';
   return `<div class="install-banner" id="installBanner">
-    <span>📲 אפשר להתקין את VoiceCourt כמו אפליקציה</span>
+    <span>📲 התקן את VoiceCourt</span>
     <div class="row" style="gap:8px;">
       <button class="btn primary" style="padding:6px 14px;font-size:13px;" data-gate-action="install-app">התקן</button>
       <button class="icon-btn" data-gate-action="dismiss-install-banner">✕</button>
@@ -263,6 +263,48 @@ function bestTermMatch(norm){
   }
   return best;
 }
+/* ============ HEBREW NUMBER WORDS -> DIGITS ============ */
+const HE_ONES = {
+  'אפס':0,'אחד':1,'אחת':1,'שתיים':2,'שניים':2,'שתי':2,'שני':2,
+  'שלוש':3,'שלושה':3,'ארבע':4,'ארבעה':4,'חמש':5,'חמישה':5,
+  'שש':6,'שישה':6,'שבע':7,'שבעה':7,'שמונה':8,'תשע':9,'תשעה':9,
+  'עשר':10,'עשרה':10
+};
+const HE_TEENS = {
+  'אחד עשר':11,'אחת עשרה':11,'שנים עשר':12,'שתים עשרה':12,'שניים עשר':12,
+  'שלושה עשר':13,'שלוש עשרה':13,'ארבעה עשר':14,'ארבע עשרה':14,
+  'חמישה עשר':15,'חמש עשרה':15,'שישה עשר':16,'שש עשרה':16,
+  'שבעה עשר':17,'שבע עשרה':17,'שמונה עשר':18,'שמונה עשרה':18,
+  'תשעה עשר':19,'תשע עשרה':19
+};
+const HE_TENS = {
+  'עשרים':20,'שלושים':30,'ארבעים':40,'חמישים':50,
+  'שישים':60,'שבעים':70,'שמונים':80,'תשעים':90
+};
+function hebrewNumberWordsToDigits(norm){
+  // Try two-word teens first (e.g. "שבעה עשר" = 17), longest matches win.
+  for(const phrase in HE_TEENS){
+    if(norm.includes(phrase)) return String(HE_TEENS[phrase]);
+  }
+  // Try "tens ו-ones" combos (e.g. "עשרים ושלוש" / "עשרים ו שלוש" = 23).
+  for(const tensWord in HE_TENS){
+    if(norm.includes(tensWord)){
+      for(const onesWord in HE_ONES){
+        if(HE_ONES[onesWord]===0) continue;
+        if(norm.includes(tensWord+' ו'+onesWord) || norm.includes(tensWord+' '+onesWord)){
+          return String(HE_TENS[tensWord]+HE_ONES[onesWord]);
+        }
+      }
+      return String(HE_TENS[tensWord]);
+    }
+  }
+  // Plain single-word number (e.g. "שבע" = 7).
+  const words = norm.split(' ');
+  for(const w of words){
+    if(w in HE_ONES) return String(HE_ONES[w]);
+  }
+  return null;
+}
 function parseCommand(transcript){
   const norm = normalizeText(transcript);
   if(/בטל|מחק אחרון|תמחק/.test(norm)) return {type:'undo'};
@@ -272,7 +314,8 @@ function parseCommand(transcript){
     return {type:'opp_event', points:bestTerm.points, raw:transcript};
   }
   const numMatch = norm.match(/\d+/);
-  return {type:'event', number: numMatch?numMatch[0]:null, term:bestTerm, raw:transcript};
+  const number = numMatch ? numMatch[0] : hebrewNumberWordsToDigits(norm);
+  return {type:'event', number, term:bestTerm, raw:transcript};
 }
 // Resolves which player a command applies to, based on the game's tracking mode:
 // 'team' requires a spoken number every time; 'sticky' remembers the last spoken
