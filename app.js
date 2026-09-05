@@ -37,6 +37,7 @@ let viewingHistoryGame = null;
 let statsPeriodFilter = 'all';
 let pendingTrackingMode = 'team';
 let pendingFixedPlayer = '';
+let editingTermId = null;
 let gateError = '';
 let gateMode = 'signin'; // 'signin' | 'signup'
 let unsubConfig = null, unsubGame = null, unsubUsers = null, unsubMe = null;
@@ -795,18 +796,29 @@ function renderRosterTab(){
 }
 function catLabel(c){ return c==='score'?'קליעה':c==='positive'?'חיובי':c==='negative'?'שלילי':'ניטרלי'; }
 function renderTermsTab(){
+  const editing = editingTermId ? settings.terms.find(t=>t.id===editingTermId) : null;
   return `
-  <div class="card"><h2>הוספת מושג</h2>
-    <div class="field"><label class="field-label">שם המושג</label><input type="text" id="newTermLabel" placeholder="למשל: עבירה טכנית"></div>
-    <div class="field"><label class="field-label">ביטויים שיזוהו (מופרדים בפסיק)</label><input type="text" id="newTermTriggers" placeholder="עבירה טכנית, טכנית"></div>
+  <div class="card"><h2>${editing? 'עריכת מושג':'הוספת מושג'}</h2>
+    <div class="field"><label class="field-label">שם המושג</label><input type="text" id="newTermLabel" value="${editing?escapeHtml(editing.label):''}" placeholder="למשל: עבירה טכנית"></div>
+    <div class="field"><label class="field-label">ביטויים שיזוהו (מופרדים בפסיק)</label><input type="text" id="newTermTriggers" value="${editing?escapeHtml(editing.triggers.join(', ')):''}" placeholder="עבירה טכנית, טכנית"></div>
     <div class="row wrap">
-      <div class="field" style="flex:1;min-width:120px;"><label class="field-label">סוג</label><select id="newTermCat"><option value="neutral">ניטרלי</option><option value="positive">חיובי</option><option value="negative">שלילי</option><option value="score">קליעה (נותן נקודות)</option></select></div>
-      <div class="field" style="flex:1;min-width:100px;"><label class="field-label">נקודות (אם קליעה)</label><input type="number" id="newTermPoints" value="0" min="0" max="3"></div>
+      <div class="field" style="flex:1;min-width:120px;"><label class="field-label">סוג</label>
+        <select id="newTermCat">
+          <option value="neutral" ${editing&&editing.category==='neutral'?'selected':''}>ניטרלי</option>
+          <option value="positive" ${editing&&editing.category==='positive'?'selected':''}>חיובי</option>
+          <option value="negative" ${editing&&editing.category==='negative'?'selected':''}>שלילי</option>
+          <option value="score" ${editing&&editing.category==='score'?'selected':''}>קליעה (נותן נקודות)</option>
+        </select>
+      </div>
+      <div class="field" style="flex:1;min-width:100px;"><label class="field-label">נקודות (אם קליעה)</label><input type="number" id="newTermPoints" value="${editing?editing.points||0:0}" min="0" max="3"></div>
     </div>
-    <button class="btn primary block" data-action="add-term">הוסף מושג</button>
+    <div class="row">
+      <button class="btn primary block" data-action="add-term">${editing?'עדכן מושג':'הוסף מושג'}</button>
+      ${editing? `<button class="btn ghost" data-action="cancel-edit-term">ביטול</button>`:''}
+    </div>
   </div>
   <div class="card"><h2>בנק מושגים (${settings.terms.length})</h2>
-    ${settings.terms.map(t=>`<div class="list-item"><div class="main"><div class="title">${escapeHtml(t.label)} <span class="cat-badge ${t.category}">${catLabel(t.category)}</span></div><div class="sub">${t.triggers.map(escapeHtml).join(', ')}</div></div><button class="icon-btn" data-action="remove-term" data-id="${t.id}">🗑</button></div>`).join('')}
+    ${settings.terms.map(t=>`<div class="list-item"><div class="main"><div class="title">${escapeHtml(t.label)} <span class="cat-badge ${t.category}">${catLabel(t.category)}</span></div><div class="sub">${t.triggers.map(escapeHtml).join(', ')}</div></div><div class="row"><button class="icon-btn" data-action="edit-term" data-id="${t.id}">✏️</button><button class="icon-btn" data-action="remove-term" data-id="${t.id}">🗑</button></div></div>`).join('')}
   </div>`;
 }
 function renderSettingsTab(){
@@ -932,10 +944,23 @@ async function onDelegatedClick(e){
     const cat = document.getElementById('newTermCat').value;
     const pts = parseInt(document.getElementById('newTermPoints').value)||0;
     if(!label || !trig){ showToast('נא למלא שם וביטויים'); return; }
-    settings.terms.push({id:uid(), label, triggers:trig.split(',').map(s=>s.trim()).filter(Boolean), category:cat, statKey:uid(), statLabel:label, points:cat==='score'?pts:0});
+    const triggers = trig.split(',').map(s=>s.trim()).filter(Boolean);
+    if(editingTermId){
+      const t = settings.terms.find(x=>x.id===editingTermId);
+      if(t){ t.label=label; t.triggers=triggers; t.category=cat; t.points=cat==='score'?pts:0; t.statLabel=label; }
+      editingTermId = null;
+      showToast('המושג עודכן');
+    } else {
+      settings.terms.push({id:uid(), label, triggers, category:cat, statKey:uid(), statLabel:label, points:cat==='score'?pts:0});
+    }
     await saveSettings(); renderMain(); return;
   }
-  if(action==='remove-term'){ settings.terms = settings.terms.filter(t=>t.id!==actionEl.dataset.id); await saveSettings(); renderMain(); return; }
+  if(action==='edit-term'){ editingTermId = actionEl.dataset.id; renderMain(); return; }
+  if(action==='cancel-edit-term'){ editingTermId = null; renderMain(); return; }
+  if(action==='remove-term'){
+    if(editingTermId===actionEl.dataset.id) editingTermId=null;
+    settings.terms = settings.terms.filter(t=>t.id!==actionEl.dataset.id); await saveSettings(); renderMain(); return;
+  }
   if(action==='save-settings'){
     settings.teamName = document.getElementById('setTeamName').value.trim() || settings.teamName;
     settings.periodsDefault = parseInt(document.getElementById('setPeriods').value)||settings.periodsDefault;
