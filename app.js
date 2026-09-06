@@ -38,6 +38,7 @@ let statsPeriodFilter = 'all';
 let pendingTrackingMode = 'team';
 let pendingFixedPlayer = '';
 let editingTermId = null;
+let menuOpen = false;
 let gateError = '';
 let gateMode = 'signin'; // 'signin' | 'signup'
 let unsubConfig = null, unsubGame = null, unsubUsers = null, unsubMe = null;
@@ -584,10 +585,17 @@ function render(){
   if(!settings){ document.getElementById('app').innerHTML = `<div style="padding:40px;text-align:center;color:#8A9AB2;">טוען נתוני קבוצה...</div>`; return; }
   const app = document.getElementById('app');
   const isAdmin = myUserDoc && myUserDoc.role==='admin';
+  const secondaryTabs = [
+    ['roster','נבחרת', iconUsers()],
+    ['terms','מושגים', iconBook()],
+    ['settings','הגדרות', iconGear()],
+    ...(isAdmin? [['admin','ניהול', iconUsers()]] : [])
+  ];
   app.innerHTML = `
     ${installBannerHtml()}
     <header class="topbar">
       <div class="row" style="align-items:center;gap:10px;">
+        <button class="icon-btn" style="font-size:22px;padding:4px 8px;" data-action="toggle-menu">☰</button>
         <img src="logo-v2.png" alt="" style="width:34px;height:34px;border-radius:9px;">
         <div>
           <div class="brand" style="font-size:18px;">Voice<span>Court</span></div>
@@ -598,15 +606,17 @@ function render(){
         <div class="faint">${game? 'משחק פעיל · ':''}${escapeHtml(myUserDoc.name)}</div>
         <button class="icon-btn" style="font-size:11px;padding:2px 4px;" data-gate-action="signout">התנתק/י</button>
       </div>
+      ${menuOpen? `
+      <div class="side-menu-overlay" data-action="toggle-menu">
+        <div class="side-menu" onclick="event.stopPropagation()">
+          ${secondaryTabs.map(([key,label,svg])=>`<button class="side-menu-item ${activeTab===key?'active':''}" data-tab="${key}">${svg}<span>${label}</span></button>`).join('')}
+        </div>
+      </div>` : ''}
     </header>
     <main id="mainArea"></main>
     <nav class="tabbar">
       ${tabBtn('game','משחק', iconWhistle())}
       ${tabBtn('stats','סטטיסטיקה', iconChart())}
-      ${tabBtn('roster','נבחרת', iconUsers())}
-      ${tabBtn('terms','מושגים', iconBook())}
-      ${tabBtn('settings','הגדרות', iconGear())}
-      ${isAdmin? tabBtn('admin','ניהול', iconUsers()) : ''}
     </nav>
   `;
   attachDelegatedEvents();
@@ -876,10 +886,16 @@ function attachDelegatedEvents(){
 }
 async function onDelegatedClick(e){
   const tabBtnEl = e.target.closest('[data-tab]');
-  if(tabBtnEl){ activeTab = tabBtnEl.dataset.tab; selectedPlayer=null; viewingHistoryGame=null; if(activeTab==='stats') loadGamesIndex(); renderMain(); return; }
+  if(tabBtnEl){
+    activeTab = tabBtnEl.dataset.tab; selectedPlayer=null; viewingHistoryGame=null;
+    if(activeTab==='stats') loadGamesIndex();
+    if(menuOpen){ menuOpen=false; render(); } else { renderMain(); }
+    return;
+  }
   const actionEl = e.target.closest('[data-action]');
   if(!actionEl) return;
   const action = actionEl.dataset.action;
+  if(action==='toggle-menu'){ menuOpen = !menuOpen; render(); return; }
 
   if(action==='start-game') return startNewGame();
   if(action==='toggle-clock') return game.running? pauseClock() : startClock();
