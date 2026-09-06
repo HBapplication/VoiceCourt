@@ -195,7 +195,8 @@ function attachAppListeners(){
   });
   unsubUsers = onSnapshot(collection(db,'users'), (snap)=>{
     users = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    if(activeTab==='admin') renderMain();
+    const iAmAdmin = myUserDoc && myUserDoc.role==='admin';
+    if(iAmAdmin) render(); else if(activeTab==='admin') renderMain();
   });
 }
 async function saveSettings(){ if(settings) await setDoc(doc(db,'teamData','config'), settings); }
@@ -585,31 +586,28 @@ function render(){
   if(!settings){ document.getElementById('app').innerHTML = `<div style="padding:40px;text-align:center;color:#8A9AB2;">טוען נתוני קבוצה...</div>`; return; }
   const app = document.getElementById('app');
   const isAdmin = myUserDoc && myUserDoc.role==='admin';
+  const pendingCount = isAdmin ? users.filter(u=>u.status==='pending').length : 0;
   const secondaryTabs = [
     ['roster','נבחרת', iconUsers()],
     ['terms','מושגים', iconBook()],
     ['settings','הגדרות', iconGear()],
-    ...(isAdmin? [['admin','ניהול', iconUsers()]] : [])
+    ...(isAdmin? [['admin','ניהול', iconUsers(), pendingCount]] : [])
   ];
   app.innerHTML = `
     ${installBannerHtml()}
     <header class="topbar">
       <div class="row" style="align-items:center;gap:10px;">
-        <button class="icon-btn" style="font-size:22px;padding:4px 8px;" data-action="toggle-menu">☰</button>
+        <button class="icon-btn" style="font-size:22px;padding:4px 8px;position:relative;" data-action="toggle-menu">☰${pendingCount? `<span class="badge-dot">${pendingCount}</span>`:''}</button>
         <img src="logo-v2.png" alt="" style="width:34px;height:34px;border-radius:9px;">
-        <div>
-          <div class="brand" style="font-size:18px;">Voice<span>Court</span></div>
-          <div class="team-name">${escapeHtml(settings.teamName)}</div>
-        </div>
+        <div class="brand" style="font-size:18px;">Voice<span>Court</span></div>
       </div>
-      <div style="text-align:left;">
-        <div class="faint">${game? 'משחק פעיל · ':''}${escapeHtml(myUserDoc.name)}</div>
-        <button class="icon-btn" style="font-size:11px;padding:2px 4px;" data-gate-action="signout">התנתק/י</button>
-      </div>
+      <div class="faint">${game? 'משחק פעיל · ':''}${escapeHtml(myUserDoc.name)}</div>
       ${menuOpen? `
       <div class="side-menu-overlay" data-action="toggle-menu">
         <div class="side-menu" onclick="event.stopPropagation()">
-          ${secondaryTabs.map(([key,label,svg])=>`<button class="side-menu-item ${activeTab===key?'active':''}" data-tab="${key}">${svg}<span>${label}</span></button>`).join('')}
+          ${secondaryTabs.map(([key,label,svg,count])=>`<button class="side-menu-item ${activeTab===key?'active':''}" data-tab="${key}" style="position:relative;">${svg}<span>${label}</span>${count? `<span class="badge-dot" style="position:static;margin-inline-start:auto;">${count}</span>`:''}</button>`).join('')}
+          <div style="flex:1;"></div>
+          <button class="side-menu-item" data-gate-action="signout" style="color:var(--neg);">${iconLogout()}<span>התנתק/י</span></button>
         </div>
       </div>` : ''}
     </header>
@@ -1010,5 +1008,6 @@ function iconChart(){ return `<svg viewBox="0 0 24 24"><line x1="4" y1="20" x2="
 function iconUsers(){ return `<svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="9" r="2.4"/><path d="M15 20c0-2.2 1-4 2.5-5"/></svg>`; }
 function iconBook(){ return `<svg viewBox="0 0 24 24"><path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v17H6.5A2.5 2.5 0 0 0 4 21.5V4.5z"/><line x1="9" y1="7" x2="15" y2="7"/></svg>`; }
 function iconGear(){ return `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>`; }
+function iconLogout(){ return `<svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>`; }
 
 renderGate();
