@@ -12,7 +12,8 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
 import {
   getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot,
-  collection, getDocs, query, orderBy, limit, serverTimestamp
+  collection, getDocs, query, where, orderBy, limit, serverTimestamp,
+  arrayUnion, arrayRemove
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
 
@@ -42,6 +43,13 @@ let menuOpen = false;
 let gateError = '';
 let gateMode = 'signin'; // 'signin' | 'signup'
 let unsubConfig = null, unsubGame = null, unsubUsers = null, unsubMe = null;
+let unsubSpaces = null, unsubSpaceDoc = null;
+let mySpaces = [];           // spaces (workspaces) the signed-in user belongs to
+let currentSpaceId = null;
+let currentSpace = null;     // {id,name,ownerUid,members} - live doc of the open space
+let spacesLoaded = false;
+let inviteError = '';
+let legacyMigrationAvailable = false; // true if old shared teamData exists and hasn't been imported yet
 let deferredInstallPrompt = null;
 let installBannerDismissed = false;
 function isStandalone(){
@@ -139,11 +147,120 @@ function detachRealtimeListeners(){
   detachAppListeners();
   if(unsubMe){ unsubMe(); unsubMe=null; }
 }
+
+/* ============ APP-LEVEL LISTENERS (only once approved) - users list + my spaces ============ */
+function attachAppListeners(){
+  if(unsubUsers) return; // already attached
+  unsubUsers = onSnapshot(collection(db,'users'), (snap)=>{
+    users = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    const iAmAdmin = myUserDoc && myUserDoc.role==='admin';
+    if(iAmAdmin) render(); else if(activeTab==='admin') renderMain();
+  });
+  unsubSpaces = onSnapshot(query(collection(db,'spaces'), where('members','array-contains', authUser.uid)), (snap)=>{
+    mySpaces = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    spacesLoaded = true;
+    if(!currentSpaceId && mySpaces.length===1){ selectSpace(mySpaces[0].id); return; }
+    renderGate();
+  });
+  // Detect old shared team data from before Spaces existed, so we can offer a one-time import.
+  getDoc(doc(db,'teamData','config')).then(snap=>{
+    legacyMigrationAvailable = snap.exists();
+    if(legacyMigrationAvailable) renderGate();
+  }).catch(()=>{});
+}
 function detachAppListeners(){
+  detachSpaceListeners();
+  if(unsubUsers){ unsubUsers(); unsubUsers=null; }
+  if(unsubSpaces){ unsubSpaces(); unsubSpaces=null; }
+  mySpaces=[]; spacesLoaded=false; currentSpaceId=null; currentSpace=null;
+}
+
+/* ============ SPACE-LEVEL LISTENERS (config + current game for the open space) ============ */
+function attachSpaceListeners(spaceId){
+  detachSpaceListeners();
+  currentSpaceId = spaceId;
+  unsubSpaceDoc = onSnapshot(doc(db,'spaces',spaceId), (snap)=>{
+    currentSpace = snap.exists()? {id:snap.id, ...snap.data()} : null;
+    if(!currentSpace){ currentSpaceId=null; renderGate(); return; }
+    renderMain();
+  });
+  unsubConfig = onSnapshot(doc(db,'spaces',spaceId,'data','config'), async (snap)=>{
+    if(snap.exists()){
+      settings = snap.data();
+      settings.terms.forEach(t=>{ if(!t.statLabel) t.statLabel=t.label; });
+    } else {
+      settings = defaultSettings();
+      await setDoc(doc(db,'spaces',spaceId,'data','config'), settings);
+    }
+    renderGate();
+  });
+  unsubGame = onSnapshot(doc(db,'spaces',spaceId,'data','currentGame'), (snap)=>{
+    game = snap.exists()? snap.data(): null;
+    restartClockTicker();
+    renderMain();
+  });
+}
+function detachSpaceListeners(){
+  if(unsubSpaceDoc){ unsubSpaceDoc(); unsubSpaceDoc=null; }
   if(unsubConfig){ unsubConfig(); unsubConfig=null; }
   if(unsubGame){ unsubGame(); unsubGame=null; }
-  if(unsubUsers){ unsubUsers(); unsubUsers=null; }
   stopClockTicker();
+  settings=null; game=null;
+}
+function selectSpace(spaceId){
+  activeTab='game'; menuOpen=false;
+  attachSpaceListeners(spaceId);
+  renderGate();
+}
+function switchSpace(){
+  detachSpaceListeners();
+  currentSpaceId=null; currentSpace=null; menuOpen=false;
+  renderGate();
+}
+async function createSpace(name){
+  if(!name){ showToast('נא לתת שם למרחב'); return; }
+  const ref = doc(collection(db,'spaces'));
+  await setDoc(ref, {name, ownerUid:authUser.uid, members:[authUser.uid], createdAt:serverTimestamp()});
+  await setDoc(doc(db,'spaces',ref.id,'data','config'), defaultSettings());
+  selectSpace(ref.id);
+}
+async function renameSpace(name){
+  if(!currentSpaceId || !name) return;
+  await updateDoc(doc(db,'spaces',currentSpaceId), {name});
+  showToast('שם המרחב עודכן');
+}
+async function inviteToSpace(email){
+  inviteError='';
+  if(!email){ inviteError='נא להזין אימייל'; renderMain(); return; }
+  const q = query(collection(db,'users'), where('email','==', email.trim().toLowerCase()));
+  const snap = await getDocs(q);
+  if(snap.empty){ inviteError='לא נמצא משתמש רשום עם האימייל הזה באפליקציה'; renderMain(); return; }
+  const invitedUid = snap.docs[0].id;
+  if(currentSpace && currentSpace.members && currentSpace.members.includes(invitedUid)){
+    inviteError='המשתמש הזה כבר במרחב'; renderMain(); return;
+  }
+  await updateDoc(doc(db,'spaces',currentSpaceId), {members: arrayUnion(invitedUid)});
+  showToast('המשתמש נוסף למרחב');
+  renderMain();
+}
+async function removeMemberFromSpace(memberUid){
+  if(!currentSpace || memberUid===currentSpace.ownerUid) return;
+  await updateDoc(doc(db,'spaces',currentSpaceId), {members: arrayRemove(memberUid)});
+}
+async function migrateLegacyData(){
+  if(!confirm('לייבא את הנתונים המשותפים הישנים כמרחב חדש בבעלותך?')) return;
+  const cfgSnap = await getDoc(doc(db,'teamData','config'));
+  const cfg = cfgSnap.exists()? cfgSnap.data() : defaultSettings();
+  const ref = doc(collection(db,'spaces'));
+  await setDoc(ref, {name: cfg.teamName||'מרחב ראשי', ownerUid:authUser.uid, members:[authUser.uid], createdAt:serverTimestamp()});
+  await setDoc(doc(db,'spaces',ref.id,'data','config'), cfg);
+  const gameSnap = await getDoc(doc(db,'teamData','currentGame'));
+  if(gameSnap.exists()) await setDoc(doc(db,'spaces',ref.id,'data','currentGame'), gameSnap.data());
+  const oldGames = await getDocs(collection(db,'games'));
+  for(const g of oldGames.docs){ await setDoc(doc(db,'spaces',ref.id,'games',g.id), g.data()); }
+  legacyMigrationAvailable = false;
+  showToast('הייבוא הושלם');
+  selectSpace(ref.id);
 }
 
 async function doSignUp(name, email, password){
@@ -175,32 +292,8 @@ function translateAuthError(e){
   return 'שגיאה: ' + (e && e.message || 'לא ידועה');
 }
 
-/* ============ APP DATA LISTENERS (only once approved) ============ */
-function attachAppListeners(){
-  if(unsubConfig) return; // already attached
-  unsubConfig = onSnapshot(doc(db,'teamData','config'), async (snap)=>{
-    if(snap.exists()){
-      settings = snap.data();
-      settings.terms.forEach(t=>{ if(!t.statLabel) t.statLabel=t.label; });
-    } else {
-      settings = defaultSettings();
-      await setDoc(doc(db,'teamData','config'), settings);
-    }
-    renderGate();
-  });
-  unsubGame = onSnapshot(doc(db,'teamData','currentGame'), (snap)=>{
-    game = snap.exists()? snap.data(): null;
-    restartClockTicker();
-    renderMain();
-  });
-  unsubUsers = onSnapshot(collection(db,'users'), (snap)=>{
-    users = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    const iAmAdmin = myUserDoc && myUserDoc.role==='admin';
-    if(iAmAdmin) render(); else if(activeTab==='admin') renderMain();
-  });
-}
-async function saveSettings(){ if(settings) await setDoc(doc(db,'teamData','config'), settings); }
-async function saveGame(){ if(game) await setDoc(doc(db,'teamData','currentGame'), game); }
+async function saveSettings(){ if(settings && currentSpaceId) await setDoc(doc(db,'spaces',currentSpaceId,'data','config'), settings); }
+async function saveGame(){ if(game && currentSpaceId) await setDoc(doc(db,'spaces',currentSpaceId,'data','currentGame'), game); }
 
 /* ============ CLOCK MODEL (synced across devices) ============ */
 // game.running (bool) + game.runningSince (client epoch ms when it was started).
@@ -461,15 +554,15 @@ function takeTimeout(){
   saveGame(); renderMain(); showToast('פסק זמן נרשם');
 }
 async function endGame(){
-  if(!game) return;
+  if(!game || !currentSpaceId) return;
   if(!confirm('לסיים את המשחק? הנתונים יישמרו בהיסטוריה.')) return;
   pauseClock();
   const finished = {...game, status:'finished'};
   const stats = computeStats(finished.events, settings.terms, 'all');
   finished.finalPoints = stats.points;
   finished.finalOppPoints = oppPoints(finished.events);
-  await setDoc(doc(db,'games',finished.id), finished);
-  await deleteDoc(doc(db,'teamData','currentGame'));
+  await setDoc(doc(db,'spaces',currentSpaceId,'games',finished.id), finished);
+  await deleteDoc(doc(db,'spaces',currentSpaceId,'data','currentGame'));
   game = null;
   activeTab='stats';
   renderMain();
@@ -492,7 +585,8 @@ function computeStats(events, terms, periodFilter){
   return {byPlayer, totals, points};
 }
 async function loadGamesIndex(){
-  const q = query(collection(db,'games'), orderBy('date','desc'), limit(25));
+  if(!currentSpaceId) return;
+  const q = query(collection(db,'spaces',currentSpaceId,'games'), orderBy('date','desc'), limit(25));
   const snap = await getDocs(q);
   gamesIndex = snap.docs.map(d=>d.data());
   renderMain();
@@ -550,7 +644,27 @@ function renderGate(){
     `);
     return;
   }
-  render(); // approved
+  if(!currentSpaceId){ renderSpacePicker(); return; }
+  if(!settings){ app.innerHTML = gateShell(`<div class="muted">טוען את המרחב...</div>`); return; }
+  render(); // approved + space open
+}
+function renderSpacePicker(){
+  const app = document.getElementById('app');
+  if(!spacesLoaded){ app.innerHTML = gateShell(`<div class="muted">טוען מרחבים...</div>`); return; }
+  app.innerHTML = gateShell(`
+    <h2>בחר/י מרחב</h2>
+    <div class="muted" style="margin-bottom:12px;">מרחב הוא סביבת עבודה נפרדת - נבחרת, כמה שחקנים, או שחקן/ית יחיד/ה שאת/ה עוקב/ת אחריו. לכל מרחב יש נבחרת, בנק מושגים ומשחקים משלו.</div>
+    ${mySpaces.length? mySpaces.map(s=>`
+      <div class="list-item">
+        <div class="main"><div class="title">${escapeHtml(s.name)}</div><div class="sub">${s.ownerUid===authUser.uid?'הבעלים שלך':'שותף/ה במרחב'} · ${(s.members||[]).length} חברים</div></div>
+        <button class="btn ghost" data-gate-action="open-space" data-id="${s.id}">פתח</button>
+      </div>`).join('') : `<div class="muted" style="margin-bottom:12px;">עדיין אין לך מרחבים.</div>`}
+    <div class="row" style="margin-top:14px;">
+      <input type="text" id="newSpaceName" placeholder="שם מרחב חדש, למשל: נבחרת נוער">
+      <button class="btn primary" data-gate-action="create-space">צור</button>
+    </div>
+    ${legacyMigrationAvailable? `<button class="btn ghost block" style="margin-top:14px;" data-gate-action="migrate-legacy">ייבוא נתונים ישנים כמרחב חדש</button>`:''}
+  `);
 }
 document.addEventListener('click', (e)=>{
   const tabEl = e.target.closest('[data-gate-tab]');
@@ -575,6 +689,9 @@ document.addEventListener('click', (e)=>{
   if(action==='admin-pending') updateDoc(doc(db,'users',el.dataset.id), {status:'pending'}).catch(showAdminError);
   if(action==='admin-delete'){ if(confirm('למחוק את המשתמש?')) deleteDoc(doc(db,'users',el.dataset.id)).catch(showAdminError); }
   if(action==='admin-promote'){ if(confirm('להפוך למנהל/ת?')) updateDoc(doc(db,'users',el.dataset.id), {role:'admin'}).catch(showAdminError); }
+  if(action==='open-space') selectSpace(el.dataset.id);
+  if(action==='create-space') createSpace(val('newSpaceName'));
+  if(action==='migrate-legacy') migrateLegacyData();
 });
 function showAdminError(e){
   console.warn(e);
@@ -599,12 +716,17 @@ function render(){
       <div class="row" style="align-items:center;gap:10px;">
         <button class="icon-btn" style="font-size:22px;padding:4px 8px;position:relative;" data-action="toggle-menu">☰${pendingCount? `<span class="badge-dot">${pendingCount}</span>`:''}</button>
         <img src="logo-v2.png" alt="" style="width:34px;height:34px;border-radius:9px;">
-        <div class="brand" style="font-size:18px;">Voice<span>Court</span></div>
+        <div>
+          <div class="brand" style="font-size:18px;">Voice<span>Court</span></div>
+          <div class="team-name">${currentSpace?escapeHtml(currentSpace.name):''}</div>
+        </div>
       </div>
       <div class="faint">${game? 'משחק פעיל · ':''}${escapeHtml(myUserDoc.name)}</div>
       ${menuOpen? `
       <div class="side-menu-overlay" data-action="toggle-menu">
         <div class="side-menu" onclick="event.stopPropagation()">
+          <button class="side-menu-item" data-action="switch-space">${iconSwap()}<span>מרחבים</span></button>
+          <div style="height:1px;background:var(--line);margin:4px 0;"></div>
           ${secondaryTabs.map(([key,label,svg,count])=>`<button class="side-menu-item ${activeTab===key?'active':''}" data-tab="${key}" style="position:relative;">${svg}<span>${label}</span>${count? `<span class="badge-dot" style="position:static;margin-inline-start:auto;">${count}</span>`:''}</button>`).join('')}
           <div style="flex:1;"></div>
           <button class="side-menu-item" data-gate-action="signout" style="color:var(--neg);">${iconLogout()}<span>התנתק/י</span></button>
@@ -830,7 +952,18 @@ function renderTermsTab(){
   </div>`;
 }
 function renderSettingsTab(){
+  const isOwner = currentSpace && currentSpace.ownerUid===authUser.uid;
+  const members = currentSpace ? (currentSpace.members||[]).map(uid_=>users.find(u=>u.id===uid_)||{id:uid_,name:uid_,email:''}) : [];
   return `
+  <div class="card"><h2>מרחב: ${currentSpace?escapeHtml(currentSpace.name):''}</h2>
+    <div class="field"><label class="field-label">שם המרחב</label><input type="text" id="setSpaceName" value="${currentSpace?escapeHtml(currentSpace.name):''}"></div>
+    <button class="btn ghost" data-action="rename-space">שמור שם מרחב</button>
+    <div class="field" style="margin-top:16px;"><label class="field-label">חברים במרחב</label></div>
+    ${members.map(m=>`<div class="list-item"><div class="main"><div class="title">${escapeHtml(m.name)} ${m.id===currentSpace.ownerUid?'<span class="cat-badge score">בעלים</span>':''}</div><div class="sub">${escapeHtml(m.email||'')}</div></div>${(isOwner && m.id!==currentSpace.ownerUid)? `<button class="icon-btn" data-action="remove-member" data-id="${m.id}">🗑</button>`:''}</div>`).join('')}
+    <div class="field" style="margin-top:12px;"><label class="field-label">הזמן/י חבר/ה למרחב (לפי אימייל רשום באפליקציה)</label><input type="text" id="inviteEmail" placeholder="name@example.com"></div>
+    ${inviteError? `<div style="color:var(--neg);font-size:13px;margin-bottom:8px;">${escapeHtml(inviteError)}</div>`:''}
+    <button class="btn primary block" data-action="invite-to-space">הזמן/י למרחב</button>
+  </div>
   <div class="card"><h2>פרטי קבוצה</h2><div class="field"><label class="field-label">שם הקבוצה</label><input type="text" id="setTeamName" value="${escapeHtml(settings.teamName)}"></div></div>
   <div class="card"><h2>ברירת מחדל למשחק</h2><div class="row wrap">
     <div class="field" style="flex:1;min-width:100px;"><label class="field-label">רבעים</label><input type="number" id="setPeriods" value="${settings.periodsDefault}" min="1" max="8"></div>
@@ -894,6 +1027,7 @@ async function onDelegatedClick(e){
   if(!actionEl) return;
   const action = actionEl.dataset.action;
   if(action==='toggle-menu'){ menuOpen = !menuOpen; render(); return; }
+  if(action==='switch-space'){ switchSpace(); return; }
 
   if(action==='start-game') return startNewGame();
   if(action==='toggle-clock') return game.running? pauseClock() : startClock();
@@ -984,6 +1118,9 @@ async function onDelegatedClick(e){
     await saveSettings(); showToast('ההגדרות נשמרו'); return;
   }
   if(action==='view-history'){ viewingHistoryGame = gamesIndex.find(g=>g.id===actionEl.dataset.id); renderMain(); return; }
+  if(action==='rename-space'){ renameSpace(document.getElementById('setSpaceName').value.trim()); return; }
+  if(action==='invite-to-space'){ inviteToSpace(document.getElementById('inviteEmail').value.trim()); return; }
+  if(action==='remove-member'){ if(confirm('להסיר את החבר/ה מהמרחב?')) removeMemberFromSpace(actionEl.dataset.id); return; }
   if(action==='back-to-live-stats'){ viewingHistoryGame = null; renderMain(); return; }
 }
 function onDelegatedChange(e){
@@ -1009,5 +1146,6 @@ function iconUsers(){ return `<svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="
 function iconBook(){ return `<svg viewBox="0 0 24 24"><path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v17H6.5A2.5 2.5 0 0 0 4 21.5V4.5z"/><line x1="9" y1="7" x2="15" y2="7"/></svg>`; }
 function iconGear(){ return `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>`; }
 function iconLogout(){ return `<svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>`; }
+function iconSwap(){ return `<svg viewBox="0 0 24 24"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>`; }
 
 renderGate();

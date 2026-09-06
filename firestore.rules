@@ -5,7 +5,7 @@ service cloud.firestore {
     // TODO: replace with your real login email (the one you sign up with).
     // Only a user document whose "email" field equals this can ever have role == 'admin' -
     // enforced here, not just in the app UI, so it can't be bypassed even by another admin.
-    function OWNER_EMAIL() { return "your-email@example.com"; }
+    function OWNER_EMAIL() { return "haim.binyamini@gmail.com"; }
 
     function isSignedIn() {
       return request.auth != null;
@@ -28,6 +28,9 @@ service cloud.firestore {
     // Each user manages their own access-request document.
     // They can create their own "pending" request, and edit only their display name afterwards.
     // Only an admin can change role/status (approve, block, promote).
+    // Reading the whole users collection is allowed for any signed-in user so that
+    // space invites can look someone up by email, and so member names/emails can
+    // be shown inside a space's member list.
     match /users/{uid} {
       allow read: if isSignedIn();
       allow create: if isSignedIn()
@@ -41,12 +44,41 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
-    // Shared team configuration: roster, concept bank, defaults.
+    // A "space" is a self-contained workspace: one team/roster/game-history, owned by
+    // whoever created it, shared with anyone listed in its "members" array (invited by email).
+    // Only approved app users can create or belong to spaces at all.
+    match /spaces/{spaceId} {
+      function isMember() {
+        return isApproved() && request.auth.uid in resource.data.members;
+      }
+      allow read: if isMember();
+      allow create: if isApproved()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.members.size() == 1
+        && request.resource.data.members[0] == request.auth.uid;
+      // Any current member can rename the space or invite/remove others (kept simple on
+      // purpose for now - trusted small groups). The app UI only offers removing non-owner
+      // members, but that is not yet enforced at the rules level - worth tightening later.
+      allow update: if isMember();
+      allow delete: if isApproved() && resource.data.ownerUid == request.auth.uid;
+
+      // Roster, concept bank, defaults, and the in-progress game for this space.
+      match /data/{docId} {
+        allow read, write: if isApproved()
+          && request.auth.uid in get(/databases/$(database)/documents/spaces/$(spaceId)).data.members;
+      }
+      // Archive of this space's finished games.
+      match /games/{gameId} {
+        allow read, write: if isApproved()
+          && request.auth.uid in get(/databases/$(database)/documents/spaces/$(spaceId)).data.members;
+      }
+    }
+
+    // Legacy (pre-Spaces) shared data, kept read/write-able only so the one-time
+    // "import old data" migration can still read it. New data should live under /spaces.
     match /teamData/{docId} {
       allow read, write: if isApproved();
     }
-
-    // Archive of finished games.
     match /games/{gameId} {
       allow read, write: if isApproved();
     }
