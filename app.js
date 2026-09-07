@@ -724,7 +724,7 @@ function render(){
       <div class="faint">${game? 'משחק פעיל · ':''}${escapeHtml(myUserDoc.name)}</div>
       ${menuOpen? `
       <div class="side-menu-overlay" data-action="toggle-menu">
-        <div class="side-menu" onclick="event.stopPropagation()">
+        <div class="side-menu">
           <button class="side-menu-item" data-action="switch-space">${iconSwap()}<span>מרחבים</span></button>
           <div style="height:1px;background:var(--line);margin:4px 0;"></div>
           ${secondaryTabs.map(([key,label,svg,count])=>`<button class="side-menu-item ${activeTab===key?'active':''}" data-tab="${key}" style="position:relative;">${svg}<span>${label}</span>${count? `<span class="badge-dot" style="position:static;margin-inline-start:auto;">${count}</span>`:''}</button>`).join('')}
